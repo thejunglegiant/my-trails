@@ -1,0 +1,276 @@
+<!doctype html>
+<html lang="uk">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>My Trails</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+<style>
+  :root { --bg:#0f1115; --panel:#171a22; --text:#e6e8ee; --muted:#9aa0ad; --accent:#4cc9f0; }
+  * { box-sizing: border-box; }
+  html, body { margin:0; padding:0; height:100%; font-family: -apple-system, system-ui, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; background: var(--bg); color: var(--text); }
+  #app { display: grid; grid-template-columns: 340px 1fr; height: 100vh; }
+  #sidebar { background: var(--panel); overflow-y: auto; border-right: 1px solid #20242e; padding: 14px 14px 30px; }
+  #map { width: 100%; height: 100%; background: #0a0c10; }
+  h1 { font-size: 16px; margin: 0 0 4px; }
+  .sub { color: var(--muted); font-size: 12px; margin-bottom: 14px; }
+  .group { background:#1d2230; border-radius: 10px; padding: 10px 12px; margin-bottom: 12px; }
+  .group label.row { display:flex; align-items:center; gap:8px; cursor:pointer; padding: 4px 0; font-size: 13px; }
+  .group .head { display:flex; justify-content: space-between; font-size:12px; color: var(--muted); margin-bottom: 6px; text-transform: uppercase; letter-spacing: 0.04em; }
+  input[type="range"] { width: 100%; }
+  .swatch { width: 12px; height: 12px; border-radius: 50%; flex-shrink: 0; box-shadow: 0 0 0 2px rgba(255,255,255,0.08); }
+  .track-row { display:flex; align-items:center; gap:8px; padding: 6px 4px; font-size: 13px; border-radius: 6px; }
+  .track-row:hover { background: rgba(255,255,255,0.03); }
+  .track-row .meta { color: var(--muted); font-size: 11px; }
+  .track-row .name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .actions { display:flex; gap:6px; margin-bottom: 10px; }
+  .actions button { flex: 1; background:#252b3a; color: var(--text); border:1px solid #2e3447; padding:6px 8px; border-radius:6px; cursor:pointer; font-size:12px; }
+  .actions button:hover { background:#2c334a; }
+  .stats { color: var(--muted); font-size: 12px; }
+  .badge { display:inline-block; background:#252b3a; color: var(--muted); padding:1px 6px; border-radius: 4px; font-size:11px; margin-left:6px; }
+  .leaflet-popup-content { font-size: 13px; }
+  .leaflet-container { background: #0a0c10; }
+  /* Dark map filter for default OSM tiles */
+  .tiles-dark { filter: invert(1) hue-rotate(180deg) brightness(0.95) contrast(0.95); }
+</style>
+</head>
+<body>
+<div id="app">
+  <aside id="sidebar">
+    <h1>My Trails</h1>
+    <div class="sub" id="subtitle">…</div>
+
+    <div class="group">
+      <div class="head">Шари</div>
+      <label class="row"><input type="checkbox" id="toggle-tracks" checked /> Треки</label>
+      <label class="row"><input type="checkbox" id="toggle-markers" checked /> Старт / фініш</label>
+      <label class="row"><input type="checkbox" id="toggle-buffer" /> Зона видимості</label>
+      <label class="row"><input type="checkbox" id="toggle-dark" checked /> Темна мапа</label>
+    </div>
+
+    <div class="group">
+      <div class="head"><span>Радіус видимості</span><span id="radius-val">12 км</span></div>
+      <input type="range" id="radius" min="1" max="25" step="1" value="12" />
+    </div>
+
+    <div class="group">
+      <div class="head"><span>Треки</span><span id="track-count"></span></div>
+      <div class="actions">
+        <button id="all">Всі</button>
+        <button id="none">Жоден</button>
+        <button id="fit">Показати всі</button>
+      </div>
+      <div id="track-list"></div>
+    </div>
+
+    <div class="stats" id="stats"></div>
+  </aside>
+  <div id="map"></div>
+</div>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="https://unpkg.com/@turf/turf@7/turf.min.js"></script>
+<script>
+(async function() {
+  const res = await fetch('tracks.json');
+  const tracks = await res.json();
+
+  const map = L.map('map', { zoomControl: true }).setView([48.5, 24.5], 8);
+
+  const tileLayer = L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+    attribution: '© OpenStreetMap',
+    maxZoom: 19,
+  }).addTo(map);
+
+  function applyDark(on) {
+    const el = tileLayer.getContainer();
+    if (!el) return;
+    if (on) el.classList.add('tiles-dark');
+    else el.classList.remove('tiles-dark');
+  }
+
+  // Build layers per track
+  const layers = tracks.map(t => {
+    const latlngs = t.points;
+    const line = L.polyline(latlngs, { color: t.color, weight: 3.5, opacity: 0.95 });
+    line.bindPopup(popupHtml(t));
+
+    const startIcon = makeDotIcon(t.color, 'S');
+    const finishIcon = makeDotIcon(t.color, 'F');
+    const start = t.start ? L.marker(t.start, { icon: startIcon, title: t.name + ' — старт' }) : null;
+    const finish = t.finish ? L.marker(t.finish, { icon: finishIcon, title: t.name + ' — фініш' }) : null;
+    if (start) start.bindPopup(popupHtml(t, 'Старт'));
+    if (finish) finish.bindPopup(popupHtml(t, 'Фініш'));
+
+    let bufferLayer = null;
+    function buildBuffer(km) {
+      if (bufferLayer) { map.removeLayer(bufferLayer); bufferLayer = null; }
+      try {
+        const line = turf.lineString(latlngs.map(p => [p[1], p[0]]));
+        const buf = turf.buffer(line, km, { units: 'kilometers' });
+        bufferLayer = L.geoJSON(buf, {
+          style: { color: t.color, weight: 1, fillColor: t.color, fillOpacity: 0.10, opacity: 0.5 }
+        });
+      } catch(e) { console.warn('buffer failed', t.name, e); }
+      return bufferLayer;
+    }
+
+    return { track: t, line, start, finish, buildBuffer, get bufferLayer() { return bufferLayer; } };
+  });
+
+  // Initial render: all tracks visible, no buffer
+  const state = {
+    visible: new Set(tracks.map(t => t.id)),
+    showTracks: true,
+    showMarkers: true,
+    showBuffer: false,
+    radiusKm: 12,
+  };
+
+  function render() {
+    layers.forEach(l => {
+      const isVisible = state.visible.has(l.track.id);
+      // Tracks
+      if (state.showTracks && isVisible) {
+        if (!map.hasLayer(l.line)) l.line.addTo(map);
+      } else {
+        if (map.hasLayer(l.line)) map.removeLayer(l.line);
+      }
+      // Markers
+      [l.start, l.finish].forEach(m => {
+        if (!m) return;
+        if (state.showMarkers && isVisible) {
+          if (!map.hasLayer(m)) m.addTo(map);
+        } else {
+          if (map.hasLayer(m)) map.removeLayer(m);
+        }
+      });
+      // Buffer
+      if (state.showBuffer && isVisible) {
+        const buf = l.buildBuffer(state.radiusKm);
+        if (buf && !map.hasLayer(buf)) buf.addTo(map);
+      } else if (l.bufferLayer && map.hasLayer(l.bufferLayer)) {
+        map.removeLayer(l.bufferLayer);
+      }
+    });
+    updateStats();
+  }
+
+  function fitAll() {
+    const visibleLayers = layers.filter(l => state.visible.has(l.track.id));
+    if (visibleLayers.length === 0) return;
+    const group = L.featureGroup(visibleLayers.map(l => l.line));
+    map.fitBounds(group.getBounds().pad(0.1));
+  }
+
+  // Sidebar
+  const list = document.getElementById('track-list');
+  tracks.forEach(t => {
+    const row = document.createElement('label');
+    row.className = 'track-row';
+    row.title = t.file;
+    const date = t.start_time ? t.start_time.slice(0, 10) : '—';
+    row.innerHTML = `
+      <input type="checkbox" data-id="${t.id}" checked />
+      <span class="swatch" style="background:${t.color}"></span>
+      <span class="name">${escapeHtml(t.name)}</span>
+      <span class="meta">${t.distance_km} км</span>
+    `;
+    row.addEventListener('click', (e) => {
+      // double-click name = focus on this track
+    });
+    row.querySelector('.name').addEventListener('dblclick', (e) => {
+      e.preventDefault();
+      const layer = layers.find(l => l.track.id === t.id);
+      if (layer) map.fitBounds(layer.line.getBounds().pad(0.15));
+    });
+    row.querySelector('input').addEventListener('change', (e) => {
+      const id = parseInt(e.target.dataset.id);
+      if (e.target.checked) state.visible.add(id);
+      else state.visible.delete(id);
+      render();
+    });
+    list.appendChild(row);
+  });
+
+  document.getElementById('toggle-tracks').addEventListener('change', e => { state.showTracks = e.target.checked; render(); });
+  document.getElementById('toggle-markers').addEventListener('change', e => { state.showMarkers = e.target.checked; render(); });
+  document.getElementById('toggle-buffer').addEventListener('change', e => { state.showBuffer = e.target.checked; render(); });
+  document.getElementById('toggle-dark').addEventListener('change', e => applyDark(e.target.checked));
+
+  document.getElementById('radius').addEventListener('input', e => {
+    state.radiusKm = parseInt(e.target.value);
+    document.getElementById('radius-val').textContent = state.radiusKm + ' км';
+    if (state.showBuffer) {
+      // rebuild buffers for visible tracks
+      layers.forEach(l => {
+        if (l.bufferLayer && map.hasLayer(l.bufferLayer)) map.removeLayer(l.bufferLayer);
+      });
+      render();
+    }
+  });
+
+  document.getElementById('all').addEventListener('click', () => {
+    state.visible = new Set(tracks.map(t => t.id));
+    document.querySelectorAll('#track-list input').forEach(i => i.checked = true);
+    render();
+  });
+  document.getElementById('none').addEventListener('click', () => {
+    state.visible.clear();
+    document.querySelectorAll('#track-list input').forEach(i => i.checked = false);
+    render();
+  });
+  document.getElementById('fit').addEventListener('click', fitAll);
+
+  // Initial
+  applyDark(true);
+  render();
+  fitAll();
+
+  // Subtitle
+  const totalKm = tracks.reduce((s, t) => s + t.distance_km, 0);
+  const totalGain = tracks.reduce((s, t) => s + (t.elev_gain_m || 0), 0);
+  document.getElementById('subtitle').textContent =
+    `${tracks.length} походів · ${totalKm.toFixed(0)} км · ${totalGain.toLocaleString('uk-UA')} м набору`;
+  document.getElementById('track-count').textContent = `${tracks.length}`;
+
+  function updateStats() {
+    const sel = tracks.filter(t => state.visible.has(t.id));
+    const km = sel.reduce((s, t) => s + t.distance_km, 0);
+    const gain = sel.reduce((s, t) => s + (t.elev_gain_m || 0), 0);
+    document.getElementById('stats').textContent =
+      `Обрано: ${sel.length} · ${km.toFixed(1)} км · ${gain.toLocaleString('uk-UA')} м`;
+  }
+
+  function popupHtml(t, marker) {
+    const date = t.start_time ? t.start_time.slice(0, 10) : '—';
+    return `
+      <div style="min-width:200px">
+        <div style="font-weight:600; margin-bottom:4px">${escapeHtml(t.name)}</div>
+        ${marker ? `<div style="color:#666; font-size:11px">${marker}</div>` : ''}
+        <div style="font-size:12px; color:#444; margin-top:6px">
+          📅 ${date}<br>
+          📏 ${t.distance_km} км<br>
+          ⛰️ ${t.elev_gain_m || 0} м набору<br>
+          📁 ${escapeHtml(t.file)}
+        </div>
+      </div>
+    `;
+  }
+
+  function makeDotIcon(color, label) {
+    return L.divIcon({
+      className: '',
+      iconSize: [16, 16],
+      iconAnchor: [8, 8],
+      html: `<div style="width:14px;height:14px;border-radius:50%;background:${color};border:2px solid #fff;box-shadow:0 0 0 1px rgba(0,0,0,0.4); display:flex;align-items:center;justify-content:center;color:#fff;font-size:9px;font-weight:700">${label}</div>`
+    });
+  }
+
+  function escapeHtml(s) {
+    return String(s).replace(/[&<>"']/g, c => ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' }[c]));
+  }
+})();
+</script>
+</body>
+</html>
