@@ -32,6 +32,13 @@
   .leaflet-container { background: #0a0c10; }
   /* Dark map filter for default OSM tiles */
   .tiles-dark { filter: invert(1) hue-rotate(180deg) brightness(0.95) contrast(0.95); }
+  /* Route hover tooltip — dark, readable */
+  .leaflet-tooltip.route-tooltip {
+    background: #1d2230; color: var(--text); border: 1px solid #2e3447;
+    border-radius: 6px; padding: 8px 10px; box-shadow: 0 4px 12px rgba(0,0,0,0.5);
+    font-size: 12px; max-width: 260px; white-space: normal;
+  }
+  .leaflet-tooltip.route-tooltip::before { border-top-color: #2e3447; }
 </style>
 </head>
 <body>
@@ -42,9 +49,10 @@
 
     <div class="group">
       <div class="head">Шари</div>
-      <label class="row"><input type="checkbox" id="toggle-tracks" checked /> Треки</label>
+      <label class="row"><input type="checkbox" id="toggle-tracks" checked /> Мої треки</label>
       <label class="row"><input type="checkbox" id="toggle-markers" checked /> Старт / фініш</label>
       <label class="row"><input type="checkbox" id="toggle-buffer" /> Зона видимості</label>
+      <label class="row"><input type="checkbox" id="toggle-routes" checked /> Маршрути vpohid</label>
       <label class="row"><input type="checkbox" id="toggle-dark" /> Інверсія (темна)</label>
     </div>
 
@@ -59,13 +67,24 @@
     </div>
 
     <div class="group">
-      <div class="head"><span>Треки</span><span id="track-count"></span></div>
+      <div class="head"><span>Мої треки</span><span id="track-count"></span></div>
       <div class="actions">
         <button id="all">Всі</button>
         <button id="none">Жоден</button>
         <button id="fit">Показати всі</button>
       </div>
       <div id="track-list"></div>
+    </div>
+
+    <div class="group" id="routes-group">
+      <div class="head"><span>Маршрути vpohid</span><span id="route-count"></span></div>
+      <label class="row"><input type="checkbox" id="filter-uncrossed" /> Тільки нові (не перетиналися)</label>
+      <label class="row"><span>Поріг "перетину"</span></label>
+      <div style="display:flex; gap:8px; align-items:center; margin-bottom:6px;">
+        <input type="range" id="cross-threshold" min="0.1" max="3" step="0.1" value="0.5" style="flex:1" />
+        <span id="cross-threshold-val" style="color:var(--muted); font-size:12px; min-width:42px; text-align:right;">0.5 км</span>
+      </div>
+      <div id="route-stats" class="stats" style="margin-top:6px;"></div>
     </div>
 
     <div class="stats" id="stats"></div>
@@ -205,6 +224,9 @@
     showMarkers: true,
     showBuffer: false,
     radiusKm: 12,
+    showRoutes: true,
+    uncrossedOnly: false,
+    crossThresholdKm: 0.5,
   };
 
   function render() {
@@ -302,8 +324,159 @@
   });
   document.getElementById('fit').addEventListener('click', fitAll);
 
+  // ---------- vpohid routes ----------
+  // Build spatial grid index of my-track points for fast proximity test.
+  const CELL_DEG = 0.05; // ~5 km
+  const myGrid = new Map();
+  function gridKey(lat, lng) {
+    return `${Math.round(lat / CELL_DEG)}:${Math.round(lng / CELL_DEG)}`;
+  }
+  tracks.forEach(t => {
+    t.points.forEach(([lat, lng]) => {
+      const k = gridKey(lat, lng);
+      let arr = myGrid.get(k);
+      if (!arr) { arr = []; myGrid.set(k, arr); }
+      arr.push([lat, lng]);
+    });
+  });
+
+  function haversineKm(lat1, lon1, lat2, lon2) {
+    const R = 6371;
+    const dLat = (lat2 - lat1) * Math.PI / 180;
+    const dLon = (lon2 - lon1) * Math.PI / 180;
+    const a = Math.sin(dLat/2)**2 + Math.cos(lat1*Math.PI/180) * Math.cos(lat2*Math.PI/180) * Math.sin(dLon/2)**2;
+    return 2 * R * Math.asin(Math.sqrt(a));
+  }
+
+  function isCrossed(routePoints, thresholdKm) {
+    for (let i = 0; i < routePoints.length; i += 3) {
+      const [lat, lng] = routePoints[i];
+      const cy = Math.round(lat / CELL_DEG);
+      const cx = Math.round(lng / CELL_DEG);
+      for (let dy = -1; dy <= 1; dy++) {
+        for (let dx = -1; dx <= 1; dx++) {
+          const cell = myGrid.get(`${cy+dy}:${cx+dx}`);
+          if (!cell) continue;
+          for (const [tlat, tlng] of cell) {
+            if (haversineKm(lat, lng, tlat, tlng) <= thresholdKm) return true;
+          }
+        }
+      }
+    }
+    return false;
+  }
+
+  let routes = [];
+  let routeLayers = [];
+  try {
+    const r = await fetch('routes.json');
+    if (r.ok) routes = await r.json();
+  } catch(e) { console.warn('routes.json not found', e); }
+
+  // Recompute crossed flag client-side for current threshold (initial)
+  function recomputeCrossed() {
+    routes.forEach(r => { r.crossed = isCrossed(r.points, state.crossThresholdKm); });
+  }
+  recomputeCrossed();
+
+  routeLayers = routes.map(r => {
+    const line = L.polyline(r.points, {
+      color: r.color || '#4cc9f0',
+      weight: 2.5,
+      opacity: 0.85,
+      dashArray: '6,4',
+    });
+    line.bindPopup(routePopup(r));
+    line.bindTooltip(routeTooltip(r), { sticky: true, direction: 'top', className: 'route-tooltip' });
+    line.on('mouseover', () => line.setStyle({ weight: 4.5, opacity: 1 }));
+    line.on('mouseout',  () => line.setStyle({ weight: 2.5, opacity: r.crossed ? 0.55 : 0.9 }));
+    return { route: r, line };
+  });
+
+  function routeShouldShow(r) {
+    if (!state.showRoutes) return false;
+    if (state.uncrossedOnly && r.crossed) return false;
+    return true;
+  }
+
+  function renderRoutes() {
+    routeLayers.forEach(rl => {
+      const show = routeShouldShow(rl.route);
+      if (show) {
+        if (!map.hasLayer(rl.line)) rl.line.addTo(map);
+        rl.line.setStyle({ color: rl.route.crossed ? '#7a8094' : (rl.route.color || '#4cc9f0'), opacity: rl.route.crossed ? 0.55 : 0.9 });
+      } else {
+        if (map.hasLayer(rl.line)) map.removeLayer(rl.line);
+      }
+    });
+    updateRouteStats();
+  }
+
+  function updateRouteStats() {
+    const total = routes.length;
+    const crossed = routes.filter(r => r.crossed).length;
+    document.getElementById('route-count').textContent = `${total}`;
+    document.getElementById('route-stats').textContent =
+      `Перетиналось: ${crossed} · нових: ${total - crossed}`;
+  }
+
+  function routeTooltip(r) {
+    const len = r.length_km ? `${r.length_km} км` : '';
+    const hrs = r.hours ? `${r.hours} год` : '';
+    const lvl = r.level ? escapeHtml(String(r.level)) : '';
+    const meta = [len, hrs, lvl].filter(Boolean).join(' · ');
+    const status = r.crossed
+      ? '<span style="color:#a8acba">✓ перетиналось</span>'
+      : '<span style="color:#86d889">★ нове</span>';
+    return `
+      <div style="font-weight:600; margin-bottom:2px">${escapeHtml(r.title || '—')}</div>
+      <div style="font-size:11px; opacity:0.85; margin-bottom:3px">${meta}</div>
+      <div style="font-size:11px;">${status} <span style="opacity:0.6">· клікни для деталей ↗</span></div>
+    `;
+  }
+
+  function routePopup(r) {
+    const len = r.length_km ? `${r.length_km} км` : '';
+    const hrs = r.hours ? `${r.hours} год` : '';
+    const lvl = r.level ? `· ${escapeHtml(String(r.level))}` : '';
+    const link = r.link ? `<a href="${escapeHtml(r.link)}" target="_blank" rel="noopener">Деталі ↗</a>` : '';
+    const crossed = r.crossed ? '<span style="color:#7a8094">✓ перетиналось</span>' : '<span style="color:#3cb44b">★ нове</span>';
+    return `
+      <div style="min-width:220px">
+        <div style="font-weight:600; margin-bottom:4px">${escapeHtml(r.title || '—')}</div>
+        <div style="font-size:12px; color:#444; margin-bottom:6px">${[len, hrs].filter(Boolean).join(' · ')} ${lvl}</div>
+        <div style="font-size:12px; color:#444; margin-bottom:6px">${escapeHtml(r.short || '')}</div>
+        <div style="font-size:12px; display:flex; justify-content:space-between; gap:10px">
+          ${crossed} ${link}
+        </div>
+      </div>
+    `;
+  }
+
+  // Wire route controls
+  document.getElementById('toggle-routes').addEventListener('change', e => {
+    state.showRoutes = e.target.checked;
+    renderRoutes();
+  });
+  document.getElementById('filter-uncrossed').addEventListener('change', e => {
+    state.uncrossedOnly = e.target.checked;
+    renderRoutes();
+  });
+  let crossDebounce = null;
+  document.getElementById('cross-threshold').addEventListener('input', e => {
+    state.crossThresholdKm = parseFloat(e.target.value);
+    document.getElementById('cross-threshold-val').textContent = state.crossThresholdKm.toFixed(1) + ' км';
+    clearTimeout(crossDebounce);
+    crossDebounce = setTimeout(() => {
+      recomputeCrossed();
+      renderRoutes();
+    }, 150);
+  });
+  // ---------- end vpohid routes ----------
+
   // Initial
   render();
+  renderRoutes();
   fitAll();
 
   // Subtitle
