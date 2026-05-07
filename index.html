@@ -45,7 +45,12 @@
       <label class="row"><input type="checkbox" id="toggle-tracks" checked /> Треки</label>
       <label class="row"><input type="checkbox" id="toggle-markers" checked /> Старт / фініш</label>
       <label class="row"><input type="checkbox" id="toggle-buffer" /> Зона видимості</label>
-      <label class="row"><input type="checkbox" id="toggle-dark" checked /> Темна мапа</label>
+      <label class="row"><input type="checkbox" id="toggle-dark" /> Інверсія (темна)</label>
+    </div>
+
+    <div class="group">
+      <div class="head">Стиль мапи</div>
+      <select id="basemap" style="width:100%; background:#252b3a; color:var(--text); border:1px solid #2e3447; padding:6px 8px; border-radius:6px; font-size:13px;"></select>
     </div>
 
     <div class="group">
@@ -77,17 +82,92 @@
 
   const map = L.map('map', { zoomControl: true }).setView([48.5, 24.5], 8);
 
-  const tileLayer = L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-    attribution: '© OpenStreetMap',
-    maxZoom: 19,
-  }).addTo(map);
+  const BASEMAPS = {
+    'osm': {
+      name: 'OpenStreetMap',
+      url: 'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',
+      attribution: '© OpenStreetMap',
+      maxZoom: 19,
+      darkByDefault: true,
+    },
+    'opentopo': {
+      name: 'Topo (контури)',
+      url: 'https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png',
+      attribution: '© OpenTopoMap (CC-BY-SA), © OpenStreetMap',
+      maxZoom: 17,
+      subdomains: 'abc',
+    },
+    'esri-sat': {
+      name: 'Супутник (Esri)',
+      url: 'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
+      attribution: 'Tiles © Esri & contributors',
+      maxZoom: 19,
+    },
+    'esri-topo': {
+      name: 'Topo (Esri)',
+      url: 'https://server.arcgisonline.com/ArcGIS/rest/services/World_Topo_Map/MapServer/tile/{z}/{y}/{x}',
+      attribution: 'Tiles © Esri',
+      maxZoom: 19,
+    },
+    'carto-light': {
+      name: 'Carto Light',
+      url: 'https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png',
+      attribution: '© OpenStreetMap, © CARTO',
+      maxZoom: 20,
+      subdomains: 'abcd',
+    },
+    'carto-dark': {
+      name: 'Carto Dark',
+      url: 'https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png',
+      attribution: '© OpenStreetMap, © CARTO',
+      maxZoom: 20,
+      subdomains: 'abcd',
+    },
+    'cyclosm': {
+      name: 'CyclOSM (outdoor)',
+      url: 'https://{s}.tile-cyclosm.openstreetmap.fr/cyclosm/{z}/{x}/{y}.png',
+      attribution: '© CyclOSM, © OpenStreetMap',
+      maxZoom: 20,
+      subdomains: 'abc',
+    },
+  };
+
+  let currentBasemap = null;
+  let currentKey = null;
+
+  function setBasemap(key) {
+    const cfg = BASEMAPS[key];
+    if (!cfg) return;
+    if (currentBasemap) map.removeLayer(currentBasemap);
+    const opts = { attribution: cfg.attribution, maxZoom: cfg.maxZoom };
+    if (cfg.subdomains) opts.subdomains = cfg.subdomains;
+    currentBasemap = L.tileLayer(cfg.url, opts).addTo(map);
+    currentKey = key;
+    // Re-apply dark filter according to checkbox
+    const darkOn = document.getElementById('toggle-dark').checked;
+    applyDark(darkOn);
+    try { localStorage.setItem('basemap', key); } catch(e) {}
+  }
 
   function applyDark(on) {
-    const el = tileLayer.getContainer();
+    const el = currentBasemap && currentBasemap.getContainer();
     if (!el) return;
     if (on) el.classList.add('tiles-dark');
     else el.classList.remove('tiles-dark');
   }
+
+  // Populate basemap selector
+  const basemapSel = document.getElementById('basemap');
+  for (const [key, cfg] of Object.entries(BASEMAPS)) {
+    const opt = document.createElement('option');
+    opt.value = key; opt.textContent = cfg.name;
+    basemapSel.appendChild(opt);
+  }
+  const savedBasemap = (() => { try { return localStorage.getItem('basemap'); } catch(e) { return null; } })();
+  const initialKey = savedBasemap && BASEMAPS[savedBasemap] ? savedBasemap : 'osm';
+  basemapSel.value = initialKey;
+  basemapSel.addEventListener('change', e => setBasemap(e.target.value));
+  setBasemap(initialKey);
 
   // Build layers per track
   const layers = tracks.map(t => {
@@ -223,7 +303,6 @@
   document.getElementById('fit').addEventListener('click', fitAll);
 
   // Initial
-  applyDark(true);
   render();
   fitAll();
 
